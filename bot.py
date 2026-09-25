@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import (
     InlineKeyboardButton, InlineKeyboardMarkup, Update,
@@ -24,6 +25,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 DEFAULT_CHANNEL = os.getenv("DEFAULT_CHANNEL", "").strip()
 AUTO_PACKS = [p.strip() for p in os.getenv("AUTO_PACKS", "").split(",") if p.strip()]
 DB_PATH = os.getenv("DB_PATH", "/tmp/bot_data.db")
+PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
                     level=logging.INFO)
@@ -31,6 +33,32 @@ log = logging.getLogger("premium-bot")
 HTML = ParseMode.HTML
 PER_PAGE = 20
 _lock = threading.Lock()
+
+
+# ---------------- tiny web server (keeps Render happy) ----------------
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"VANTA awake")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_web_server():
+    try:
+        srv = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        log.info("health server on port %d", PORT)
+    except Exception as e:
+        log.warning("web server failed: %s", e)
 
 
 # ---------------- db ----------------
@@ -916,6 +944,7 @@ async def load_pack_from_bot(bot, name):
 
 def main():
     if not BOT_TOKEN: raise SystemExit("BOT_TOKEN missing")
+    start_web_server()
     app = (Application.builder().token(BOT_TOKEN).post_init(post_init).build())
     app.add_handler(CommandHandler("start", c_start))
     app.add_handler(CommandHandler("menu", c_start))
