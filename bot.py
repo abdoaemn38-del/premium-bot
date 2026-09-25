@@ -26,18 +26,33 @@ AUTO_PACKS = [p.strip() for p in os.getenv("AUTO_PACKS", "").split(",") if p.str
 DB_PATH = os.getenv("DB_PATH", "./bot_data.db")
 PORT = int(os.getenv("PORT", "8080"))
 
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                    level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO)
 log = logging.getLogger("premium-bot")
+
 HTML = ParseMode.HTML
 PER_PAGE = 20
 _lock = threading.Lock()
 
-# UI emojis loaded from packs (key -> {'id', 'char'})
+# UI premium emojis: {key: {'id': str, 'char': str}}
 UI_E = {}
 
+UI_CHAR_MAP = {
+    "👋": "wave", "🧩": "browse", "✍️": "draft", "✍": "draft",
+    "➕": "addpack", "📦": "packs", "📄": "tpls", "⭐": "favs",
+    "📢": "channels", "⏰": "sched", "📊": "stats", "❓": "help",
+    "🏠": "home", "📤": "send", "🖼": "media", "💾": "save",
+    "🗑": "clear", "🔍": "search", "📋": "list", "✅": "check",
+    "❌": "cross", "🔥": "fire", "❤️": "heart", "❤": "heart",
+    "💀": "skull", "🦇": "bat", "🎉": "party", "💎": "gem",
+    "👑": "crown", "💯": "hundred", "🌟": "star2", "⚡": "bolt",
+    "🎬": "video", "👁": "eye", "✏️": "edit", "✏": "edit",
+    "⚙️": "gear", "⚙": "gear", "🚀": "rocket",
+}
 
-# ==================== HEALTH SERVER ====================
+
+# ==================== HEALTH ====================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -93,19 +108,25 @@ class DB:
 
     def ex(self, sql, p=()):
         with _lock:
-            c = self.conn.execute(sql, p); self.conn.commit(); return c
+            c = self.conn.execute(sql, p)
+            self.conn.commit()
+            return c
+
     def q(self, sql, p=()):
         with _lock:
             return self.conn.execute(sql, p).fetchall()
+
     def q1(self, sql, p=()):
         with _lock:
             return self.conn.execute(sql, p).fetchone()
 
     def add_pack(self, name, title):
         r = self.q1("SELECT id FROM packs WHERE name=?", (name,))
-        if r: return r["id"]
-        return self.ex("INSERT INTO packs(name,title,created_at) VALUES(?,?,?)",
-                       (name, title, int(time.time()))).lastrowid
+        if r:
+            return r["id"]
+        return self.ex(
+            "INSERT INTO packs(name,title,created_at) VALUES(?,?,?)",
+            (name, title, int(time.time()))).lastrowid
 
     def list_packs(self): return self.q("SELECT * FROM packs ORDER BY id")
     def get_pack(self, pid): return self.q1("SELECT * FROM packs WHERE id=?", (pid,))
@@ -114,108 +135,144 @@ class DB:
 
     def add_emoji(self, char, doc_id, pack_id):
         r = self.q1("SELECT num FROM emojis WHERE doc_id=?", (doc_id,))
-        if r: return r["num"], False
-        c = self.ex("INSERT INTO emojis(char,doc_id,pack_id) VALUES(?,?,?)",
-                    (char, doc_id, pack_id))
+        if r:
+            return r["num"], False
+        c = self.ex(
+            "INSERT INTO emojis(char,doc_id,pack_id) VALUES(?,?,?)",
+            (char, doc_id, pack_id))
         return c.lastrowid, True
 
-    def get_emoji(self, num): return self.q1("SELECT * FROM emojis WHERE num=?", (str(num),))
-    def bump_use(self, num): self.ex("UPDATE emojis SET uses=uses+1 WHERE num=?", (str(num),))
+    def get_emoji(self, num):
+        return self.q1("SELECT * FROM emojis WHERE num=?", (str(num),))
+    def bump_use(self, num):
+        self.ex("UPDATE emojis SET uses=uses+1 WHERE num=?", (str(num),))
     def toggle_fav(self, num):
         self.ex("UPDATE emojis SET favorite=1-favorite WHERE num=?", (str(num),))
         r = self.q1("SELECT favorite FROM emojis WHERE num=?", (str(num),))
         return bool(r and r["favorite"])
-    def list_favs(self): return self.q("SELECT * FROM emojis WHERE favorite=1 ORDER BY num")
+    def list_favs(self):
+        return self.q("SELECT * FROM emojis WHERE favorite=1 ORDER BY num")
     def top_used(self, n=10):
-        return self.q("SELECT * FROM emojis WHERE uses>0 ORDER BY uses DESC LIMIT ?", (n,))
+        return self.q(
+            "SELECT * FROM emojis WHERE uses>0 ORDER BY uses DESC LIMIT ?", (n,))
+
     def count_emojis(self, pid=None, search=None):
         if pid and search:
-            return self.q1("SELECT COUNT(*) n FROM emojis WHERE pack_id=? AND char LIKE ?",
-                           (pid, f"%{search}%"))["n"]
-        if pid: return self.q1("SELECT COUNT(*) n FROM emojis WHERE pack_id=?", (pid,))["n"]
-        if search: return self.q1("SELECT COUNT(*) n FROM emojis WHERE char LIKE ?",
-                                  (f"%{search}%",))["n"]
+            return self.q1(
+                "SELECT COUNT(*) n FROM emojis WHERE pack_id=? AND char LIKE ?",
+                (pid, f"%{search}%"))["n"]
+        if pid:
+            return self.q1(
+                "SELECT COUNT(*) n FROM emojis WHERE pack_id=?", (pid,))["n"]
+        if search:
+            return self.q1(
+                "SELECT COUNT(*) n FROM emojis WHERE char LIKE ?",
+                (f"%{search}%",))["n"]
         return self.q1("SELECT COUNT(*) n FROM emojis")["n"]
+
     def list_emojis(self, pid=None, search=None, page=0, per=20):
         off = page * per
         if pid and search:
-            return self.q("SELECT * FROM emojis WHERE pack_id=? AND char LIKE ? ORDER BY num LIMIT ? OFFSET ?",
-                          (pid, f"%{search}%", per, off))
+            return self.q(
+                "SELECT * FROM emojis WHERE pack_id=? AND char LIKE ? "
+                "ORDER BY num LIMIT ? OFFSET ?",
+                (pid, f"%{search}%", per, off))
         if pid:
-            return self.q("SELECT * FROM emojis WHERE pack_id=? ORDER BY num LIMIT ? OFFSET ?",
-                          (pid, per, off))
+            return self.q(
+                "SELECT * FROM emojis WHERE pack_id=? ORDER BY num LIMIT ? OFFSET ?",
+                (pid, per, off))
         if search:
-            return self.q("SELECT * FROM emojis WHERE char LIKE ? ORDER BY num LIMIT ? OFFSET ?",
-                          (f"%{search}%", per, off))
-        return self.q("SELECT * FROM emojis ORDER BY num LIMIT ? OFFSET ?", (per, off))
+            return self.q(
+                "SELECT * FROM emojis WHERE char LIKE ? ORDER BY num LIMIT ? OFFSET ?",
+                (f"%{search}%", per, off))
+        return self.q(
+            "SELECT * FROM emojis ORDER BY num LIMIT ? OFFSET ?", (per, off))
 
     def get_draft(self, uid):
         r = self.q1("SELECT * FROM draft WHERE user_id=?", (uid,))
         if not r:
-            self.ex("INSERT INTO draft(user_id,body,updated_at) VALUES(?,?,?)",
-                    (uid, "", int(time.time())))
+            self.ex(
+                "INSERT INTO draft(user_id,body,updated_at) VALUES(?,?,?)",
+                (uid, "", int(time.time())))
             r = self.q1("SELECT * FROM draft WHERE user_id=?", (uid,))
         return r
+
     def set_draft(self, uid, body):
         self.get_draft(uid)
-        self.ex("UPDATE draft SET body=?,updated_at=? WHERE user_id=?",
-                (body, int(time.time()), uid))
+        self.ex(
+            "UPDATE draft SET body=?,updated_at=? WHERE user_id=?",
+            (body, int(time.time()), uid))
+
     def set_media(self, uid, mt, fid):
         self.get_draft(uid)
-        self.ex("UPDATE draft SET media_type=?,media_file_id=?,updated_at=? WHERE user_id=?",
-                (mt, fid, int(time.time()), uid))
+        self.ex(
+            "UPDATE draft SET media_type=?,media_file_id=?,updated_at=? "
+            "WHERE user_id=?",
+            (mt, fid, int(time.time()), uid))
+
+    def clear_media(self, uid):
+        self.get_draft(uid)
+        self.ex(
+            "UPDATE draft SET media_type=NULL,media_file_id=NULL WHERE user_id=?",
+            (uid,))
+
     def clear_draft(self, uid):
         self.get_draft(uid)
-        self.ex("UPDATE draft SET body='',media_type=NULL,media_file_id=NULL WHERE user_id=?",
-                (uid,))
+        self.ex(
+            "UPDATE draft SET body='',media_type=NULL,media_file_id=NULL "
+            "WHERE user_id=?", (uid,))
 
     def save_tpl(self, name, body):
         try:
-            self.ex("INSERT INTO templates(name,body,created_at) VALUES(?,?,?)",
-                    (name, body, int(time.time())))
+            self.ex(
+                "INSERT INTO templates(name,body,created_at) VALUES(?,?,?)",
+                (name, body, int(time.time())))
             return True
         except sqlite3.IntegrityError:
             return False
+
     def list_tpls(self): return self.q("SELECT * FROM templates ORDER BY id DESC")
     def get_tpl(self, tid): return self.q1("SELECT * FROM templates WHERE id=?", (tid,))
     def del_tpl(self, tid): self.ex("DELETE FROM templates WHERE id=?", (tid,))
 
     def add_channel(self, cid, title):
         try:
-            self.ex("INSERT INTO channels(chat_id,title,created_at) VALUES(?,?,?)",
-                    (cid, title, int(time.time())))
+            self.ex(
+                "INSERT INTO channels(chat_id,title,created_at) VALUES(?,?,?)",
+                (cid, title, int(time.time())))
             return True
         except sqlite3.IntegrityError:
             return False
+
     def list_channels(self): return self.q("SELECT * FROM channels ORDER BY id")
     def get_channel(self, rid): return self.q1("SELECT * FROM channels WHERE id=?", (rid,))
+    def get_channel_by_cid(self, cid):
+        return self.q1("SELECT * FROM channels WHERE chat_id=?", (str(cid),))
     def del_channel(self, rid): self.ex("DELETE FROM channels WHERE id=?", (rid,))
 
     def add_sched(self, ids, uid, run_at, job_id=None):
-        return self.ex("INSERT INTO scheduled(chat_ids,body,run_at,job_id) VALUES(?,?,?,?)",
-                       (ids, uid, run_at, job_id)).lastrowid
-    def set_job(self, sid, jid): self.ex("UPDATE scheduled SET job_id=? WHERE id=?", (jid, sid))
+        return self.ex(
+            "INSERT INTO scheduled(chat_ids,body,run_at,job_id) VALUES(?,?,?,?)",
+            (ids, uid, run_at, job_id)).lastrowid
+
+    def set_job(self, sid, jid):
+        self.ex("UPDATE scheduled SET job_id=? WHERE id=?", (jid, sid))
+
     def list_sched(self):
-        return self.q("SELECT * FROM scheduled WHERE run_at > ? ORDER BY run_at", (int(time.time()),))
-    def del_sched(self, sid): self.ex("DELETE FROM scheduled WHERE id=?", (sid,))
+        return self.q(
+            "SELECT * FROM scheduled WHERE run_at > ? ORDER BY run_at",
+            (int(time.time()),))
+
+    def del_sched(self, sid):
+        self.ex("DELETE FROM scheduled WHERE id=?", (sid,))
 
 
 db = DB(DB_PATH)
 
 
-# ==================== UI EMOJI HELPERS ====================
-# map standard chars to UI keys so we pick the right premium emoji
-UI_CHAR_MAP = {
-    "👋": "wave", "🧩": "browse", "✍️": "draft", "✍": "draft",
-    "➕": "addpack", "📦": "packs", "📄": "tpls", "⭐": "favs",
-    "📢": "channels", "⏰": "sched", "📊": "stats", "❓": "help",
-    "🏠": "home", "📤": "send", "🖼": "media", "💾": "save",
-    "⏱": "clock", "🗑": "clear", "⬅️": "back", "⬅": "back",
-    "🔍": "search", "📋": "list", "✅": "check", "❌": "cross",
-    "🔥": "fire", "❤️": "heart", "❤": "heart", "💀": "skull",
-    "🦇": "bat", "🎉": "party", "💎": "gem", "👑": "crown",
-    "💯": "hundred", "🌟": "star2", "⚡": "bolt",
-}
+# ==================== UI HELPERS ====================
+def esc(s):
+    return html.escape(s or "", quote=False)
 
 
 def ui(key, fallback=""):
@@ -235,12 +292,14 @@ async def build_ui_emojis():
     log.info("UI emojis loaded: %d", len(UI_E))
 
 
-# ==================== UTILS ====================
+# ==================== COMPOSE ====================
 TOKEN_RE = re.compile(r"\{(\d+)\}|\[\[([^\]|]+)\|([^\]]+)\]\]")
 DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
-def esc(s): return html.escape(s or "", quote=False)
-def nd(s): return s.translate(DIGITS)
+
+def nd(s):
+    return s.translate(DIGITS)
+
 
 def fmt(t):
     t = esc(t)
@@ -250,6 +309,7 @@ def fmt(t):
     t = re.sub(r"\|\|([^|\n]+)\|\|", r"<tg-spoiler>\1</tg-spoiler>", t)
     t = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', t)
     return t
+
 
 def render(body, lookup):
     parts, buttons, missing, used = [], [], [], []
@@ -261,8 +321,8 @@ def render(body, lookup):
             item = lookup(num)
             if item:
                 parts.append(
-                    f'<tg-emoji emoji-id="{item["doc_id"]}">{esc(item["char"])}</tg-emoji>'
-                )
+                    f'<tg-emoji emoji-id="{item["doc_id"]}">'
+                    f'{esc(item["char"])}</tg-emoji>')
                 used.append(num)
             else:
                 missing.append(num)
@@ -273,22 +333,33 @@ def render(body, lookup):
     parts.append(fmt(body[last:]))
     return "".join(parts), buttons, missing, used
 
+
 def kb_buttons(bs):
-    if not bs: return None
+    if not bs:
+        return None
     rows, row = [], []
     for label, url in bs[:20]:
         row.append(InlineKeyboardButton(label[:40], url=url))
-        if len(row) == 2: rows.append(row); row = []
-    if row: rows.append(row)
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-def u16len(s): return len(s.encode("utf-16-le")) // 2
+
+def u16len(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
 def u16char(t, off):
     c = 0
     for i, ch in enumerate(t):
-        if c >= off: return i
+        if c >= off:
+            return i
         c += u16len(ch)
     return len(t)
+
 
 def extract_emoji(msg):
     text = msg.text or msg.caption or ""
@@ -300,6 +371,7 @@ def extract_emoji(msg):
             en = u16char(text, e.offset + e.length)
             out.append((text[s:en], e.custom_emoji_id))
     return out
+
 
 def clean_pack_name(s):
     s = s.strip().rstrip("/")
@@ -321,24 +393,32 @@ def kb_main():
          InlineKeyboardButton("❓ مساعدة", callback_data="m:help")],
     ])
 
+
 def kb_home():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🏠 القائمة", callback_data="m:home")]])
 
+
 def kb_grid(items, pid, page, pages, search=None):
     rows, row = [], []
     for it in items:
-        row.append(InlineKeyboardButton(f'{it["char"]} {it["num"]}',
-                                        callback_data=f'p:{it["num"]}'))
-        if len(row) == 4: rows.append(row); row = []
-    if row: rows.append(row)
+        row.append(InlineKeyboardButton(
+            f'{it["char"]} {it["num"]}',
+            callback_data=f'p:{it["num"]}'))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     s = search or ""
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("◀️", callback_data=f"b:{pid}:{page-1}:{s}"))
+        nav.append(InlineKeyboardButton(
+            "◀️", callback_data=f"b:{pid}:{page-1}:{s}"))
     nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="noop"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton("▶️", callback_data=f"b:{pid}:{page+1}:{s}"))
+        nav.append(InlineKeyboardButton(
+            "▶️", callback_data=f"b:{pid}:{page+1}:{s}"))
     rows.append(nav)
     rows.append([
         InlineKeyboardButton("🔍 بحث", callback_data=f"s:{pid}"),
@@ -346,6 +426,7 @@ def kb_grid(items, pid, page, pages, search=None):
     ])
     rows.append([InlineKeyboardButton("🏠 القائمة", callback_data="m:home")])
     return InlineKeyboardMarkup(rows)
+
 
 def kb_draft():
     return InlineKeyboardMarkup([
@@ -358,19 +439,25 @@ def kb_draft():
         [InlineKeyboardButton("🏠 القائمة", callback_data="m:home")],
     ])
 
+
 def kb_preview():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 إرسال", callback_data="d:send")],
+        [InlineKeyboardButton("📤 انشر الآن", callback_data="d:send")],
         [InlineKeyboardButton("✏️ تعديل", callback_data="d:edit"),
          InlineKeyboardButton("💾 قالب", callback_data="d:save")],
+        [InlineKeyboardButton("⏰ جدولة", callback_data="d:sched"),
+         InlineKeyboardButton("🗑 مسح", callback_data="d:clr")],
         [InlineKeyboardButton("🏠 القائمة", callback_data="m:home")],
     ])
 
+
 def kb_channels(rows, prefix="send"):
-    kb = [[InlineKeyboardButton(f"📢 {(r['title'] or r['chat_id'])[:40]}",
-                                callback_data=f"{prefix}:{r['id']}")] for r in rows]
-    kb.append([InlineKeyboardButton("➕ إضافة", callback_data="m:addch"),
-               InlineKeyboardButton("🗑 مسح", callback_data="m:delch")])
+    kb = [[InlineKeyboardButton(
+        f"📢 {(r['title'] or r['chat_id'])[:40]}",
+        callback_data=f"{prefix}:{r['id']}")] for r in rows]
+    kb.append([
+        InlineKeyboardButton("➕ إضافة", callback_data="m:addch"),
+        InlineKeyboardButton("🗑 مسح", callback_data="m:delch")])
     kb.append([InlineKeyboardButton("🏠 القائمة", callback_data="m:home")])
     return InlineKeyboardMarkup(kb)
 
@@ -379,7 +466,8 @@ def kb_channels(rows, prefix="send"):
 def owner_only(fn):
     async def w(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = update.effective_user
-        if OWNER_ID and u and u.id != OWNER_ID: return
+        if OWNER_ID and u and u.id != OWNER_ID:
+            return
         return await fn(update, ctx)
     return w
 
@@ -388,13 +476,15 @@ def owner_only(fn):
 async def load_pack_from_bot(bot, name):
     st = await bot.get_sticker_set(clean_pack_name(name))
     kind = getattr(st.sticker_type, "value", st.sticker_type)
-    if kind != "custom_emoji": return 0
+    if kind != "custom_emoji":
+        return 0
     pid = db.add_pack(st.name, st.title)
     added = 0
     for s in st.stickers:
         if s.custom_emoji_id:
             _, new = db.add_emoji(s.emoji, s.custom_emoji_id, pid)
-            if new: added += 1
+            if new:
+                added += 1
     return added
 
 
@@ -402,16 +492,16 @@ async def load_pack_from_bot(bot, name):
 @owner_only
 async def c_start(update, ctx):
     b = ui("bat", "🦇")
-    spark = ui("star2", "✨")
     txt = (
-        f"{b} <b>بوت الإيموجي البريميوم</b> {spark}\n\n"
-        f"{ui('browse', '🧩')} <b>تصفّح</b> — دوّر على إيموجي واعرف رقمه\n"
+        f"{b} <b>بوت الإيموجي البريميوم</b>\n\n"
+        f"{ui('browse', '🧩')} <b>تصفّح</b> — كل الإيموجي مرقّم\n"
         f"{ui('draft', '✍️')} <b>مسودتي</b> — اكتب منشورك\n"
-        f"{ui('addpack', '➕')} <b>ضيف حزمة</b> — اكتب رابط أو اسم حزمة\n"
-        f"{ui('send', '📤')} <b>إرسال</b> — انشر لقناتك\n\n"
-        f"<i>اختار من الأزرار تحت</i> 👇"
+        f"{ui('addpack', '➕')} <b>ضيف حزمة</b> — رابط أو اسم\n"
+        f"{ui('send', '📤')} <b>انشر</b> — على قناتك بضغطة\n\n"
+        f"<i>اختار من الأزرار تحت 👇</i>"
     )
-    await update.message.reply_text(txt, parse_mode=HTML, reply_markup=kb_main())
+    await update.message.reply_text(
+        txt, parse_mode=HTML, reply_markup=kb_main())
 
 
 @owner_only
@@ -423,7 +513,7 @@ async def c_help(update, ctx):
         "• <code>*bold*</code> • <code>_italic_</code> • <code>~strike~</code>\n"
         "• <code>||spoiler||</code>\n"
         "• <code>[نص](url)</code> — لينك\n"
-        "• <code>[[زر|url]]</code> — زر شفاف\n\n"
+        "• <code>[[زر|url]]</code> — زر شفاف تحت المنشور\n\n"
         "<b>الأوامر:</b>\n"
         "/addpack — ضيف حزمة\n"
         "/browse — تصفّح\n"
@@ -432,7 +522,8 @@ async def c_help(update, ctx):
         "/schedule &lt;دقائق&gt;\n"
         "/save &lt;اسم&gt;\n"
         "/channels /addchannel\n"
-        "/stats",
+        "/stats — إحصائيات\n"
+        "/export — نسخة احتياطية",
         parse_mode=HTML, reply_markup=kb_main())
 
 
@@ -451,6 +542,9 @@ async def c_addpack(update, ctx):
         await update.message.reply_text(
             f"{ui('check', '✅')} انضاف <b>{added}</b> إيموجي.",
             parse_mode=HTML)
+    else:
+        await update.message.reply_text(
+            "⚠️ الحزمة موجودة أو مفيش إيموجي جديد.")
 
 
 @owner_only
@@ -462,30 +556,35 @@ async def c_browse(update, ctx):
 async def show_browse(target, ctx, pid, page, search):
     total = db.count_emojis(pid, search or None)
     if total == 0:
-        return await target.reply_text("مفيش إيموجي هنا.", reply_markup=kb_home())
+        return await target.reply_text(
+            "مفيش إيموجي هنا.", reply_markup=kb_home())
     pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
     page = max(0, min(page, pages - 1))
     items = db.list_emojis(pid, search or None, page, PER_PAGE)
     title = "كل الإيموجي"
     if pid:
-        p = db.get_pack(pid); title = esc(p["title"]) if p else "?"
-    extra = f" — بحث: {esc(search)}" if search else ""
-    b = ui("browse", "🧩")
+        p = db.get_pack(pid)
+        title = esc(p["title"]) if p else "?"
+    extra = f" — بحث: <b>{esc(search)}</b>" if search else ""
     await target.reply_text(
-        f"{b} <b>{title}</b>{extra}\n"
+        f"{ui('browse', '🧩')} <b>{title}</b>{extra}\n"
         f"{ui('list', '📋')} {total} إيموجي — صفحة {page+1}/{pages}\n"
-        f"<i>دوس على إيموجي يطلعلك رقمه.</i>",
+        f"<i>دوس على إيموجي يطلعلك رقمه للنسخ.</i>",
         parse_mode=HTML,
-        reply_markup=kb_grid(items, pid or 0, page, pages, search or None))
+        reply_markup=kb_grid(
+            items, pid or 0, page, pages, search or None))
 
 
 @owner_only
 async def c_packs(update, ctx):
     rows = db.list_packs()
-    if not rows: return await update.message.reply_text("مفيش حزم.")
+    if not rows:
+        return await update.message.reply_text("مفيش حزم.")
     lines = [f"{ui('packs', '📦')} <b>الحزم:</b>\n"]
     for p in rows:
-        lines.append(f"• <code>{p['id']}</code> — {esc(p['title'])} ({db.count_pack(p['id'])})")
+        lines.append(
+            f"• <code>{p['id']}</code> — {esc(p['title'])} "
+            f"({db.count_pack(p['id'])})")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
 
 
@@ -494,8 +593,12 @@ async def c_draft(update, ctx):
     d = db.get_draft(update.effective_user.id)
     body = d["body"] or ""
     shown = (body[:3000] + "…") if len(body) > 3000 else body
+    media = ""
+    if d["media_type"]:
+        media = f"\n{ui('media', '🖼')} فيه ميديا محفوظة"
     await update.message.reply_text(
-        f"{ui('draft', '✍️')} <b>مسودتك:</b>\n\n<code>{esc(shown) or '(فاضية)'}</code>",
+        f"{ui('draft', '✍️')} <b>مسودتك:</b>{media}\n\n"
+        f"<code>{esc(shown) or '(فاضية)'}</code>",
         parse_mode=HTML, reply_markup=kb_draft())
 
 
@@ -511,58 +614,78 @@ async def c_new(update, ctx):
 async def c_send(update, ctx):
     chs = db.list_channels()
     if not chs:
-        if DEFAULT_CHANNEL: return await do_send(update.message, ctx, DEFAULT_CHANNEL)
-        return await update.message.reply_text("مفيش قنوات. /addchannel")
-    if len(chs) == 1: return await do_send(update.message, ctx, chs[0]["chat_id"])
-    await update.message.reply_text("اختار قناة:", reply_markup=kb_channels(chs))
+        if DEFAULT_CHANNEL:
+            return await do_send(update.message, ctx, DEFAULT_CHANNEL)
+        return await update.message.reply_text(
+            f"{ui('channels', '📢')} مفيش قنوات. /addchannel")
+    if len(chs) == 1:
+        return await do_send(update.message, ctx, chs[0]["chat_id"])
+    await update.message.reply_text(
+        f"{ui('send', '📤')} اختار قناة:",
+        reply_markup=kb_channels(chs))
 
 
 async def do_send(msg, ctx, chat_id):
     uid = msg.from_user.id
     d = db.get_draft(uid)
     body = d["body"] or ""
-    if not body.strip(): return await msg.reply_text("مسودتك فاضية.")
+    if not body.strip():
+        return await msg.reply_text("مسودتك فاضية.")
     html_out, btns, _, used = render(body, db.get_emoji)
-    for n in used: db.bump_use(n)
+    for n in used:
+        db.bump_use(n)
     kb = kb_buttons(btns)
     kw = dict(parse_mode=HTML)
-    if kb: kw["reply_markup"] = kb
+    if kb:
+        kw["reply_markup"] = kb
     try:
         if d["media_type"] == "photo":
-            await ctx.bot.send_photo(chat_id, d["media_file_id"], caption=html_out, **kw)
+            await ctx.bot.send_photo(
+                chat_id, d["media_file_id"], caption=html_out, **kw)
         elif d["media_type"] == "video":
-            await ctx.bot.send_video(chat_id, d["media_file_id"], caption=html_out, **kw)
+            await ctx.bot.send_video(
+                chat_id, d["media_file_id"], caption=html_out, **kw)
         else:
             await ctx.bot.send_message(chat_id, html_out, **kw)
-        await msg.reply_text(f"{ui('check', '✅')} اتبعت.", parse_mode=HTML)
+        await msg.reply_text(
+            f"{ui('check', '✅')} اتنشر على القناة.",
+            parse_mode=HTML)
     except TelegramError as e:
-        await msg.reply_text(f"❌ فشل: {e}")
+        await msg.reply_text(f"❌ فشل النشر: {e}")
 
 
 async def show_preview(target, ctx):
     uid = target.from_user.id
     d = db.get_draft(uid)
     body = d["body"] or ""
-    if not body.strip(): return await target.reply_text("مسودتك فاضية.")
+    if not body.strip():
+        return await target.reply_text("مسودتك فاضية.")
     html_out, btns, missing, used = render(body, db.get_emoji)
-    for n in used: db.bump_use(n)
+    for n in used:
+        db.bump_use(n)
     kb = kb_buttons(btns)
     kw = dict(parse_mode=HTML)
-    if kb: kw["reply_markup"] = kb
+    if kb:
+        kw["reply_markup"] = kb
     try:
         if d["media_type"] == "photo":
-            await target.reply_photo(d["media_file_id"], caption=html_out, **kw)
+            await target.reply_photo(
+                d["media_file_id"], caption=html_out, **kw)
         elif d["media_type"] == "video":
-            await target.reply_video(d["media_file_id"], caption=html_out, **kw)
+            await target.reply_video(
+                d["media_file_id"], caption=html_out, **kw)
         else:
             await target.reply_text(html_out, **kw)
     except TelegramError as e:
         return await target.reply_text(f"❌ {e}")
     note = ""
     if missing:
-        note = "\n⚠️ أرقام مش موجودة: " + ", ".join(f"{{{m}}}" for m in missing)
+        note = "\n⚠️ أرقام مش موجودة: " + ", ".join(
+            f"{{{m}}}" for m in missing)
     await target.reply_text(
-        f"{ui('list', '📋')} <b>الكود الخام:</b>\n<code>" + esc(html_out) + "</code>" + note,
+        f"{ui('eye', '👁')} <b>ده الشكل النهائي فوق</b>\n"
+        f"{ui('list', '📋')} <b>الكود الخام:</b>\n"
+        f"<code>{esc(html_out)}</code>{note}",
         parse_mode=HTML, reply_markup=kb_preview())
 
 
@@ -575,40 +698,51 @@ async def c_schedule(update, ctx):
 
 
 async def do_schedule(msg, ctx, raw):
-    try: minutes = int(nd(raw.strip()))
-    except ValueError: return await msg.reply_text("اكتب رقم صحيح.")
-    if minutes < 1: return await msg.reply_text("الحد دقيقة.")
+    try:
+        minutes = int(nd(raw.strip()))
+    except ValueError:
+        return await msg.reply_text("اكتب رقم صحيح.")
+    if minutes < 1:
+        return await msg.reply_text("الحد دقيقة.")
     chs = db.list_channels()
-    if not chs: return await msg.reply_text("مفيش قنوات.")
+    if not chs:
+        return await msg.reply_text("مفيش قنوات.")
     ids = ",".join(c["chat_id"] for c in chs)
     run_at = int(time.time()) + minutes * 60
     sid = db.add_sched(ids, msg.from_user.id, run_at)
 
     async def job(context):
         row = db.q1("SELECT * FROM scheduled WHERE id=?", (sid,))
-        if not row: return
+        if not row:
+            return
         d = db.get_draft(row["body"])
         body = d["body"] or ""
-        if not body.strip(): return
+        if not body.strip():
+            return
         html_out, btns, _, _ = render(body, db.get_emoji)
         kb = kb_buttons(btns)
         kw = dict(parse_mode=HTML)
-        if kb: kw["reply_markup"] = kb
+        if kb:
+            kw["reply_markup"] = kb
         for cid in row["chat_ids"].split(","):
-            try: await context.bot.send_message(cid.strip(), html_out, **kw)
-            except TelegramError as e: log.warning("sched %s", e)
+            try:
+                await context.bot.send_message(cid.strip(), html_out, **kw)
+            except TelegramError as e:
+                log.warning("sched %s", e)
         db.del_sched(sid)
 
-    j = ctx.job_queue.run_once(job, when=minutes*60, name=f"sch{sid}")
+    j = ctx.job_queue.run_once(job, when=minutes * 60, name=f"sch{sid}")
     db.set_job(sid, str(j.id) if j and j.id else "")
     await msg.reply_text(
-        f"{ui('clock', '⏰')} هينشر بعد {minutes} دقيقة.", parse_mode=HTML)
+        f"{ui('sched', '⏰')} هينشر بعد <b>{minutes}</b> دقيقة.",
+        parse_mode=HTML)
 
 
 @owner_only
 async def c_sched_list(update, ctx):
     rows = db.list_sched()
-    if not rows: return await update.message.reply_text("مفيش مجدولة.")
+    if not rows:
+        return await update.message.reply_text("مفيش مجدولة.")
     lines = [f"{ui('sched', '⏰')} <b>المجدولة:</b>\n"]
     for r in rows:
         m = max(0, (r["run_at"] - int(time.time())) // 60)
@@ -619,10 +753,14 @@ async def c_sched_list(update, ctx):
 
 @owner_only
 async def c_delsched(update, ctx):
-    if not ctx.args: return
-    try: sid = int(ctx.args[0])
-    except ValueError: return
-    for j in ctx.job_queue.get_jobs_by_name(f"sch{sid}"): j.schedule_removal()
+    if not ctx.args:
+        return
+    try:
+        sid = int(ctx.args[0])
+    except ValueError:
+        return
+    for j in ctx.job_queue.get_jobs_by_name(f"sch{sid}"):
+        j.schedule_removal()
     db.del_sched(sid)
     await update.message.reply_text("اتمسحت.")
 
@@ -637,13 +775,16 @@ async def c_save(update, ctx):
 
 async def do_save_tpl(msg, ctx, name):
     name = name.strip()[:60]
-    if not name: return await msg.reply_text("اسم فاضي.")
+    if not name:
+        return await msg.reply_text("اسم فاضي.")
     d = db.get_draft(msg.from_user.id)
     body = d["body"] or ""
-    if not body.strip(): return await msg.reply_text("مسودتك فاضية.")
+    if not body.strip():
+        return await msg.reply_text("مسودتك فاضية.")
     if db.save_tpl(name, body):
         await msg.reply_text(
-            f"{ui('save', '💾')} اتحفظ «{esc(name)}»", parse_mode=HTML)
+            f"{ui('save', '💾')} اتحفظ «{esc(name)}»",
+            parse_mode=HTML)
     else:
         await msg.reply_text("الاسم موجود.")
 
@@ -651,29 +792,37 @@ async def do_save_tpl(msg, ctx, name):
 @owner_only
 async def c_tpls(update, ctx):
     rows = db.list_tpls()
-    if not rows: return await update.message.reply_text("مفيش قوالب.")
+    if not rows:
+        return await update.message.reply_text("مفيش قوالب.")
     lines = [f"{ui('tpls', '📄')} <b>القوالب:</b>\n"]
-    for r in rows: lines.append(f"• <code>{r['id']}</code> — {esc(r['name'])}")
+    for r in rows:
+        lines.append(f"• <code>{r['id']}</code> — {esc(r['name'])}")
     lines.append("\nتحميل: /tpl &lt;id&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
 
 
 @owner_only
 async def c_tpl(update, ctx):
-    if not ctx.args: return
-    try: tid = int(ctx.args[0])
-    except ValueError: return
+    if not ctx.args:
+        return
+    try:
+        tid = int(ctx.args[0])
+    except ValueError:
+        return
     r = db.get_tpl(tid)
-    if not r: return await update.message.reply_text("مش موجود.")
+    if not r:
+        return await update.message.reply_text("مش موجود.")
     db.set_draft(update.effective_user.id, r["body"])
     await update.message.reply_text(
-        f"{ui('check', '✅')} اتحمّل في المسودة.", parse_mode=HTML)
+        f"{ui('check', '✅')} اتحمّل في المسودة.",
+        parse_mode=HTML)
 
 
 @owner_only
 async def c_favs(update, ctx):
     rows = db.list_favs()
-    if not rows: return await update.message.reply_text("مفيش مفضلة.")
+    if not rows:
+        return await update.message.reply_text("مفيش مفضلة.")
     lines = [f"{ui('favs', '⭐')} <b>المفضلة:</b>\n"]
     for r in rows[:60]:
         lines.append(
@@ -685,9 +834,14 @@ async def c_favs(update, ctx):
 @owner_only
 async def c_channels(update, ctx):
     rows = db.list_channels()
-    if not rows: return await update.message.reply_text("مفيش قنوات. /addchannel")
+    if not rows:
+        return await update.message.reply_text(
+            "مفيش قنوات. /addchannel")
     lines = [f"{ui('channels', '📢')} <b>القنوات:</b>\n"]
-    for r in rows: lines.append(f"• <code>{r['id']}</code> — {esc(r['title'] or r['chat_id'])}")
+    for r in rows:
+        lines.append(
+            f"• <code>{r['id']}</code> — "
+            f"{esc(r['title'] or r['chat_id'])}")
     lines.append("\nمسح: /delchannel &lt;id&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
 
@@ -696,36 +850,46 @@ async def c_channels(update, ctx):
 async def c_addchannel(update, ctx):
     if not ctx.args:
         ctx.user_data["s"] = "ch"
-        return await update.message.reply_text("ابعت @username أو -100...")
+        return await update.message.reply_text(
+            "ابعت @username أو -100... القناة.")
     await do_addch(update.message, ctx, ctx.args[0])
 
 
 async def do_addch(msg, ctx, raw):
     cid = raw.strip()
-    try: chat = await ctx.bot.get_chat(cid)
-    except TelegramError as e: return await msg.reply_text(f"❌ {e}")
+    try:
+        chat = await ctx.bot.get_chat(cid)
+    except TelegramError as e:
+        return await msg.reply_text(f"❌ {e}")
     title = chat.title or chat.username or str(chat.id)
     if db.add_channel(str(chat.id), title):
         await msg.reply_text(
-            f"{ui('check', '✅')} انضافت «{esc(title)}»", parse_mode=HTML)
+            f"{ui('check', '✅')} انضافت «{esc(title)}»",
+            parse_mode=HTML)
     else:
-        await msg.reply_text("موجودة.")
+        await msg.reply_text("موجودة من قبل.")
 
 
 @owner_only
 async def c_delchannel(update, ctx):
-    if not ctx.args: return
-    try: rid = int(ctx.args[0])
-    except ValueError: return
+    if not ctx.args:
+        return
+    try:
+        rid = int(ctx.args[0])
+    except ValueError:
+        return
     db.del_channel(rid)
     await update.message.reply_text("اتمسحت.")
 
 
 @owner_only
 async def c_stats(update, ctx):
-    packs = db.list_packs(); total = db.count_emojis()
-    favs = len(db.list_favs()); tpls = len(db.list_tpls())
-    chs = len(db.list_channels()); sch = len(db.list_sched())
+    packs = db.list_packs()
+    total = db.count_emojis()
+    favs = len(db.list_favs())
+    tpls = len(db.list_tpls())
+    chs = len(db.list_channels())
+    sch = len(db.list_sched())
     top = db.top_used(10)
     lines = [
         f"{ui('stats', '📊')} <b>إحصائيات</b>\n",
@@ -740,7 +904,8 @@ async def c_stats(update, ctx):
         lines.append(f"{ui('fire', '🔥')} <b>الأكثر استخداماً:</b>")
         for r in top:
             lines.append(
-                f'<tg-emoji emoji-id="{r["doc_id"]}">{esc(r["char"])}</tg-emoji> '
+                f'<tg-emoji emoji-id="{r["doc_id"]}">'
+                f'{esc(r["char"])}</tg-emoji> '
                 f'<code>{{{r["num"]}}}</code> × {r["uses"]}')
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
 
@@ -751,24 +916,28 @@ async def c_export(update, ctx):
         "packs": [dict(p) for p in db.list_packs()],
         "emojis": [dict(e) for e in db.list_emojis(per=100000)],
         "templates": [dict(t) for t in db.list_tpls()],
+        "channels": [dict(c) for c in db.list_channels()],
         "exported_at": int(time.time()),
     }
     raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    await ctx.bot.send_document(update.effective_chat.id, raw,
-                                filename="backup.json",
-                                caption=f"{len(data['emojis'])} إيموجي")
+    await ctx.bot.send_document(
+        update.effective_chat.id, raw,
+        filename="backup.json",
+        caption=f"{len(data['emojis'])} إيموجي")
 
 
 # ==================== TEXT / MEDIA ====================
 @owner_only
 async def on_text(update, ctx):
     msg = update.message
-    if not msg: return
+    if not msg:
+        return
     text = msg.text or msg.caption or ""
     state = ctx.user_data.pop("s", None)
 
     if state == "pack":
-        try: added = await load_pack_from_bot(ctx.bot, text)
+        try:
+            added = await load_pack_from_bot(ctx.bot, text)
         except TelegramError as e:
             return await msg.reply_text(f"❌ {e}")
         if added:
@@ -776,11 +945,17 @@ async def on_text(update, ctx):
             await msg.reply_text(
                 f"{ui('check', '✅')} انضاف <b>{added}</b> إيموجي.",
                 parse_mode=HTML)
+        else:
+            await msg.reply_text("⚠️ مفيش إيموجي جديد.")
         return
-    if state == "ch": return await do_addch(msg, ctx, text)
-    if state == "tplname": return await do_save_tpl(msg, ctx, text)
-    if state == "sched": return await do_schedule(msg, ctx, text)
-    if state == "search": return await show_browse(msg, ctx, None, 0, text.strip())
+    if state == "ch":
+        return await do_addch(msg, ctx, text)
+    if state == "tplname":
+        return await do_save_tpl(msg, ctx, text)
+    if state == "sched":
+        return await do_schedule(msg, ctx, text)
+    if state == "search":
+        return await show_browse(msg, ctx, None, 0, text.strip())
 
     found = extract_emoji(msg)
     if found:
@@ -801,22 +976,28 @@ async def on_text(update, ctx):
 
     await msg.reply_text(
         f"{ui('help', '❓')} ابعتلي منشور فيه <code>{{رقم}}</code>، "
-        f"أو /start للقائمة.", parse_mode=HTML)
+        f"أو /start للقائمة.",
+        parse_mode=HTML)
 
 
 @owner_only
 async def on_media(update, ctx):
     msg = update.message
-    if not msg: return
+    if not msg:
+        return
     uid = msg.from_user.id
     if msg.photo:
         db.set_media(uid, "photo", msg.photo[-1].file_id)
-        if msg.caption: db.set_draft(uid, msg.caption)
-        await msg.reply_text(f"{ui('media', '🖼')} اتحفظت.", parse_mode=HTML)
+        if msg.caption:
+            db.set_draft(uid, msg.caption)
+        await msg.reply_text(
+            f"{ui('media', '🖼')} اتحفظت الصورة.", parse_mode=HTML)
     elif msg.video:
         db.set_media(uid, "video", msg.video.file_id)
-        if msg.caption: db.set_draft(uid, msg.caption)
-        await msg.reply_text(f"{ui('media', '🎬')} اتحفظ.", parse_mode=HTML)
+        if msg.caption:
+            db.set_draft(uid, msg.caption)
+        await msg.reply_text(
+            f"{ui('video', '🎬')} اتحفظ الفيديو.", parse_mode=HTML)
 
 
 # ==================== CALLBACKS ====================
@@ -825,98 +1006,122 @@ async def on_cb(update, ctx):
     q = update.callback_query
     d = q.data or ""
     try:
-        if d == "noop": return await q.answer()
+        if d == "noop":
+            return await q.answer()
 
         if d == "m:home":
             await q.edit_message_text(
-                f"{ui('bat', '🦇')} <b>القائمة</b>", parse_mode=HTML,
-                reply_markup=kb_main())
+                f"{ui('bat', '🦇')} <b>القائمة</b>",
+                parse_mode=HTML, reply_markup=kb_main())
             return await q.answer()
         if d == "m:browse":
             await q.answer()
             return await show_browse(q.message, ctx, None, 0, "")
         if d == "m:addpack":
             ctx.user_data["s"] = "pack"
-            await q.edit_message_text("ابعتلي اسم الحزمة أو الرابط.",
-                                      reply_markup=kb_home())
+            await q.edit_message_text(
+                "ابعتلي اسم الحزمة أو الرابط.", reply_markup=kb_home())
             return await q.answer()
         if d == "m:packs":
             rows = db.list_packs()
             if not rows:
                 await q.edit_message_text("مفيش حزم.", reply_markup=kb_home())
             else:
-                kb = [[InlineKeyboardButton(f"🧩 {p['title'][:30]}",
-                                            callback_data=f"b:{p['id']}:0:")] for p in rows]
-                kb.append([InlineKeyboardButton("🏠 القائمة", callback_data="m:home")])
-                await q.edit_message_text("📦 اختار حزمة:", parse_mode=HTML,
-                                          reply_markup=InlineKeyboardMarkup(kb))
+                kb = [[InlineKeyboardButton(
+                    f"🧩 {p['title'][:30]}",
+                    callback_data=f"b:{p['id']}:0:")] for p in rows]
+                kb.append([InlineKeyboardButton(
+                    "🏠 القائمة", callback_data="m:home")])
+                await q.edit_message_text(
+                    "📦 اختار حزمة:", parse_mode=HTML,
+                    reply_markup=InlineKeyboardMarkup(kb))
             return await q.answer()
         if d == "m:draft":
             row = db.get_draft(q.from_user.id)
             body = row["body"] or ""
             shown = (body[:3000] + "…") if len(body) > 3000 else body
             await q.edit_message_text(
-                f"<b>مسودتك:</b>\n\n<code>{esc(shown) or '(فاضية)'}</code>",
+                f"<b>مسودتك:</b>\n\n"
+                f"<code>{esc(shown) or '(فاضية)'}</code>",
                 parse_mode=HTML, reply_markup=kb_draft())
             return await q.answer()
         if d == "m:tpls":
             rows = db.list_tpls()
             if not rows:
-                await q.edit_message_text("مفيش قوالب.", reply_markup=kb_home())
+                await q.edit_message_text(
+                    "مفيش قوالب.", reply_markup=kb_home())
             else:
-                kb = [[InlineKeyboardButton(f"📄 {r['name'][:30]}", callback_data=f"tu:{r['id']}"),
-                       InlineKeyboardButton("🗑", callback_data=f"td:{r['id']}")] for r in rows]
-                kb.append([InlineKeyboardButton("🏠 القائمة", callback_data="m:home")])
-                await q.edit_message_text("📄 القوالب",
-                                          reply_markup=InlineKeyboardMarkup(kb))
+                kb = [[
+                    InlineKeyboardButton(
+                        f"📄 {r['name'][:30]}",
+                        callback_data=f"tu:{r['id']}"),
+                    InlineKeyboardButton(
+                        "🗑", callback_data=f"td:{r['id']}")
+                ] for r in rows]
+                kb.append([InlineKeyboardButton(
+                    "🏠 القائمة", callback_data="m:home")])
+                await q.edit_message_text(
+                    "📄 القوالب",
+                    reply_markup=InlineKeyboardMarkup(kb))
             return await q.answer()
         if d == "m:favs":
             rows = db.list_favs()
             if not rows:
-                await q.edit_message_text("مفيش مفضلة.", reply_markup=kb_home())
+                await q.edit_message_text(
+                    "مفيش مفضلة.", reply_markup=kb_home())
             else:
                 lines = [f"{ui('favs', '⭐')} <b>المفضلة</b>\n"]
                 for r in rows[:40]:
                     lines.append(
-                        f'<tg-emoji emoji-id="{r["doc_id"]}">{esc(r["char"])}</tg-emoji> '
+                        f'<tg-emoji emoji-id="{r["doc_id"]}">'
+                        f'{esc(r["char"])}</tg-emoji> '
                         f'<code>{{{r["num"]}}}</code>')
-                await q.edit_message_text("\n".join(lines), parse_mode=HTML,
-                                          reply_markup=kb_home())
+                await q.edit_message_text(
+                    "\n".join(lines), parse_mode=HTML,
+                    reply_markup=kb_home())
             return await q.answer()
         if d == "m:channels":
             rows = db.list_channels()
             await q.edit_message_text(
                 "📢 <b>القنوات</b>", parse_mode=HTML,
                 reply_markup=kb_channels(rows, "chd") if rows
-                else InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة", callback_data="m:addch"),
-                                            InlineKeyboardButton("🏠", callback_data="m:home")]]))
+                else InlineKeyboardMarkup([[
+                    InlineKeyboardButton("➕ إضافة", callback_data="m:addch"),
+                    InlineKeyboardButton("🏠", callback_data="m:home")]]))
             return await q.answer()
         if d == "m:addch":
             ctx.user_data["s"] = "ch"
-            await q.edit_message_text("ابعت @username أو -100...", reply_markup=kb_home())
+            await q.edit_message_text(
+                "ابعت @username أو -100...", reply_markup=kb_home())
             return await q.answer()
         if d == "m:delch":
             rows = db.list_channels()
             if not rows:
-                await q.edit_message_text("مفيش قنوات.", reply_markup=kb_home())
+                await q.edit_message_text(
+                    "مفيش قنوات.", reply_markup=kb_home())
             else:
-                kb = [[InlineKeyboardButton(f"🗑 {r['title'][:30]}", callback_data=f"chx:{r['id']}")]
-                      for r in rows]
-                kb.append([InlineKeyboardButton("🏠", callback_data="m:home")])
-                await q.edit_message_text("اختار للمسح:",
-                                          reply_markup=InlineKeyboardMarkup(kb))
+                kb = [[InlineKeyboardButton(
+                    f"🗑 {r['title'][:30]}", callback_data=f"chx:{r['id']}")]
+                    for r in rows]
+                kb.append([InlineKeyboardButton(
+                    "🏠", callback_data="m:home")])
+                await q.edit_message_text(
+                    "اختار للمسح:",
+                    reply_markup=InlineKeyboardMarkup(kb))
             return await q.answer()
         if d == "m:sched":
             rows = db.list_sched()
             if not rows:
-                await q.edit_message_text("مفيش مجدولة.", reply_markup=kb_home())
+                await q.edit_message_text(
+                    "مفيش مجدولة.", reply_markup=kb_home())
             else:
                 lines = [f"{ui('sched', '⏰')} <b>المجدولة</b>\n"]
                 for r in rows:
                     m = max(0, (r["run_at"] - int(time.time())) // 60)
                     lines.append(f"• <code>{r['id']}</code> بعد ~{m} دقيقة")
-                await q.edit_message_text("\n".join(lines), parse_mode=HTML,
-                                          reply_markup=kb_home())
+                await q.edit_message_text(
+                    "\n".join(lines), parse_mode=HTML,
+                    reply_markup=kb_home())
             return await q.answer()
         if d == "m:stats":
             await q.answer()
@@ -934,24 +1139,27 @@ async def on_cb(update, ctx):
         if d.startswith("p:"):
             num = d.split(":", 1)[1]
             it = db.get_emoji(num)
-            if not it: return await q.answer("مش موجود.", show_alert=True)
+            if not it:
+                return await q.answer("مش موجود.", show_alert=True)
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton("⭐ مفضلة", callback_data=f"fv:{num}"),
-                InlineKeyboardButton("📋 الرقم", callback_data="noop"),
-            ]])
+                InlineKeyboardButton("📋 الرقم", callback_data="noop")]])
             await q.answer(f"{{{num}}} = {it['char']}", show_alert=True)
             try:
                 await q.message.reply_text(
-                    f'<tg-emoji emoji-id="{it["doc_id"]}">{esc(it["char"])}</tg-emoji> → '
+                    f'<tg-emoji emoji-id="{it["doc_id"]}">'
+                    f'{esc(it["char"])}</tg-emoji> → '
                     f'<code>{{{num}}}</code>',
                     parse_mode=HTML, reply_markup=kb)
-            except TelegramError: pass
+            except TelegramError:
+                pass
             return
 
         if d.startswith("fv:"):
             num = d.split(":", 1)[1]
             state = db.toggle_fav(num)
-            return await q.answer("⭐ اتضاف" if state else "اتشال")
+            return await q.answer(
+                "⭐ اتضاف للمفضلة" if state else "اتشال من المفضلة")
 
         if d.startswith("s:"):
             ctx.user_data["s"] = "search"
@@ -962,12 +1170,14 @@ async def on_cb(update, ctx):
             _, pid, s = d.split(":", 2)
             pid = int(pid) if pid != "0" else None
             items = db.list_emojis(pid, s or None, 0, 100000)
-            if not items: return await q.answer("فاضي.", show_alert=True)
+            if not items:
+                return await q.answer("فاضي.", show_alert=True)
             lines = [f'{it["num"]}={it["char"]}' for it in items]
             chunk = "\n".join(lines)
             for i in range(0, len(chunk), 3500):
                 await q.message.reply_text(
-                    "<code>" + esc(chunk[i:i+3500]) + "</code>", parse_mode=HTML)
+                    "<code>" + esc(chunk[i:i+3500]) + "</code>",
+                    parse_mode=HTML)
             return await q.answer()
 
         if d == "d:prev":
@@ -975,7 +1185,8 @@ async def on_cb(update, ctx):
             return await show_preview(q.message, ctx)
         if d == "d:edit":
             await q.answer()
-            return await q.message.reply_text("ابعت النص الجديد.")
+            return await q.message.reply_text(
+                f"{ui('edit', '✏️')} ابعت النص الجديد.", parse_mode=HTML)
         if d == "d:clr":
             db.clear_draft(q.from_user.id)
             return await q.answer("اتمسحت.")
@@ -985,7 +1196,8 @@ async def on_cb(update, ctx):
             return await q.message.reply_text("اسم القالب؟")
         if d == "d:media":
             await q.answer()
-            return await q.message.reply_text("ابعت الصورة/الفيديو.")
+            return await q.message.reply_text(
+                "ابعت الصورة أو الفيديو.")
         if d == "d:sched":
             ctx.user_data["s"] = "sched"
             await q.answer()
@@ -994,16 +1206,22 @@ async def on_cb(update, ctx):
             await q.answer()
             chs = db.list_channels()
             if not chs:
-                if DEFAULT_CHANNEL: return await do_send(q.message, ctx, DEFAULT_CHANNEL)
-                return await q.message.reply_text("مفيش قنوات. /addchannel")
-            if len(chs) == 1: return await do_send(q.message, ctx, chs[0]["chat_id"])
-            return await q.message.reply_text("اختار قناة:", reply_markup=kb_channels(chs))
+                if DEFAULT_CHANNEL:
+                    return await do_send(q.message, ctx, DEFAULT_CHANNEL)
+                return await q.message.reply_text(
+                    "مفيش قنوات. /addchannel")
+            if len(chs) == 1:
+                return await do_send(
+                    q.message, ctx, chs[0]["chat_id"])
+            return await q.message.reply_text(
+                "اختار قناة:", reply_markup=kb_channels(chs))
 
         if d.startswith("send:"):
             rid = int(d.split(":", 1)[1])
             ch = db.get_channel(rid)
             await q.answer()
-            if ch: return await do_send(q.message, ctx, ch["chat_id"])
+            if ch:
+                return await do_send(q.message, ctx, ch["chat_id"])
             return
 
         if d.startswith("chx:"):
@@ -1014,10 +1232,13 @@ async def on_cb(update, ctx):
         if d.startswith("tu:"):
             tid = int(d.split(":", 1)[1])
             t = db.get_tpl(tid)
-            if not t: return await q.answer("مش موجود.", show_alert=True)
+            if not t:
+                return await q.answer("مش موجود.", show_alert=True)
             db.set_draft(q.from_user.id, t["body"])
             await q.answer("اتحمّل")
-            return await q.message.reply_text("✅ اتحمّل في المسودة.")
+            return await q.message.reply_text(
+                f"{ui('check', '✅')} اتحمّل في المسودة.",
+                parse_mode=HTML)
         if d.startswith("td:"):
             tid = int(d.split(":", 1)[1])
             db.del_tpl(tid)
@@ -1025,8 +1246,10 @@ async def on_cb(update, ctx):
 
     except Exception as e:
         log.exception("cb")
-        try: await q.answer(f"خطأ: {e}", show_alert=True)
-        except Exception: pass
+        try:
+            await q.answer(f"خطأ: {e}", show_alert=True)
+        except Exception:
+            pass
 
 
 # ==================== STARTUP ====================
@@ -1044,9 +1267,13 @@ async def post_init(app):
 
 
 def main():
-    if not BOT_TOKEN: raise SystemExit("BOT_TOKEN missing")
+    if not BOT_TOKEN:
+        raise SystemExit("BOT_TOKEN missing")
     start_web_server()
-    app = (Application.builder().token(BOT_TOKEN).post_init(post_init).build())
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .post_init(post_init)
+           .build())
     app.add_handler(CommandHandler("start", c_start))
     app.add_handler(CommandHandler("menu", c_start))
     app.add_handler(CommandHandler("help", c_help))
@@ -1070,9 +1297,11 @@ def main():
     app.add_handler(CommandHandler("export", c_export))
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE, on_media))
+        (filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE,
+        on_media))
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        (filters.TEXT | filters.CAPTION)
+        & ~filters.COMMAND & filters.ChatType.PRIVATE,
         on_text))
     log.info("bot running")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
