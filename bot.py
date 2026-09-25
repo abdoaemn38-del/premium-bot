@@ -6,7 +6,6 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import (
@@ -19,12 +18,12 @@ from telegram.ext import (
     ContextTypes, MessageHandler, filters,
 )
 
-# ---------------- config ----------------
+# ==================== CONFIG ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 DEFAULT_CHANNEL = os.getenv("DEFAULT_CHANNEL", "").strip()
 AUTO_PACKS = [p.strip() for p in os.getenv("AUTO_PACKS", "").split(",") if p.strip()]
-DB_PATH = os.getenv("DB_PATH", "/tmp/bot_data.db")
+DB_PATH = os.getenv("DB_PATH", "./bot_data.db")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -34,8 +33,11 @@ HTML = ParseMode.HTML
 PER_PAGE = 20
 _lock = threading.Lock()
 
+# UI emojis loaded from packs (key -> {'id', 'char'})
+UI_E = {}
 
-# ---------------- tiny web server (keeps Render happy) ----------------
+
+# ==================== HEALTH SERVER ====================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -47,21 +49,20 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
-    def log_message(self, *args):
+    def log_message(self, *a):
         pass
 
 
 def start_web_server():
     try:
         srv = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
         log.info("health server on port %d", PORT)
     except Exception as e:
         log.warning("web server failed: %s", e)
 
 
-# ---------------- db ----------------
+# ==================== DB ====================
 class DB:
     def __init__(self, path):
         self.conn = sqlite3.connect(path, check_same_thread=False)
@@ -93,11 +94,9 @@ class DB:
     def ex(self, sql, p=()):
         with _lock:
             c = self.conn.execute(sql, p); self.conn.commit(); return c
-
     def q(self, sql, p=()):
         with _lock:
             return self.conn.execute(sql, p).fetchall()
-
     def q1(self, sql, p=()):
         with _lock:
             return self.conn.execute(sql, p).fetchone()
@@ -105,9 +104,8 @@ class DB:
     def add_pack(self, name, title):
         r = self.q1("SELECT id FROM packs WHERE name=?", (name,))
         if r: return r["id"]
-        c = self.ex("INSERT INTO packs(name,title,created_at) VALUES(?,?,?)",
-                    (name, title, int(time.time())))
-        return c.lastrowid
+        return self.ex("INSERT INTO packs(name,title,created_at) VALUES(?,?,?)",
+                       (name, title, int(time.time()))).lastrowid
 
     def list_packs(self): return self.q("SELECT * FROM packs ORDER BY id")
     def get_pack(self, pid): return self.q1("SELECT * FROM packs WHERE id=?", (pid,))
@@ -122,7 +120,6 @@ class DB:
         return c.lastrowid, True
 
     def get_emoji(self, num): return self.q1("SELECT * FROM emojis WHERE num=?", (str(num),))
-    def del_emoji(self, num): self.ex("DELETE FROM emojis WHERE num=?", (str(num),))
     def bump_use(self, num): self.ex("UPDATE emojis SET uses=uses+1 WHERE num=?", (str(num),))
     def toggle_fav(self, num):
         self.ex("UPDATE emojis SET favorite=1-favorite WHERE num=?", (str(num),))
@@ -195,9 +192,8 @@ class DB:
     def del_channel(self, rid): self.ex("DELETE FROM channels WHERE id=?", (rid,))
 
     def add_sched(self, ids, uid, run_at, job_id=None):
-        c = self.ex("INSERT INTO scheduled(chat_ids,body,run_at,job_id) VALUES(?,?,?,?)",
-                    (ids, uid, run_at, job_id))
-        return c.lastrowid
+        return self.ex("INSERT INTO scheduled(chat_ids,body,run_at,job_id) VALUES(?,?,?,?)",
+                       (ids, uid, run_at, job_id)).lastrowid
     def set_job(self, sid, jid): self.ex("UPDATE scheduled SET job_id=? WHERE id=?", (jid, sid))
     def list_sched(self):
         return self.q("SELECT * FROM scheduled WHERE run_at > ? ORDER BY run_at", (int(time.time()),))
@@ -207,7 +203,39 @@ class DB:
 db = DB(DB_PATH)
 
 
-# ---------------- utils ----------------
+# ==================== UI EMOJI HELPERS ====================
+# map standard chars to UI keys so we pick the right premium emoji
+UI_CHAR_MAP = {
+    "👋": "wave", "🧩": "browse", "✍️": "draft", "✍": "draft",
+    "➕": "addpack", "📦": "packs", "📄": "tpls", "⭐": "favs",
+    "📢": "channels", "⏰": "sched", "📊": "stats", "❓": "help",
+    "🏠": "home", "📤": "send", "🖼": "media", "💾": "save",
+    "⏱": "clock", "🗑": "clear", "⬅️": "back", "⬅": "back",
+    "🔍": "search", "📋": "list", "✅": "check", "❌": "cross",
+    "🔥": "fire", "❤️": "heart", "❤": "heart", "💀": "skull",
+    "🦇": "bat", "🎉": "party", "💎": "gem", "👑": "crown",
+    "💯": "hundred", "🌟": "star2", "⚡": "bolt",
+}
+
+
+def ui(key, fallback=""):
+    item = UI_E.get(key)
+    if item:
+        return f'<tg-emoji emoji-id="{item["id"]}">{esc(item["char"])}</tg-emoji>'
+    return fallback
+
+
+async def build_ui_emojis():
+    global UI_E
+    rows = db.q("SELECT doc_id, char FROM emojis")
+    for r in rows:
+        k = UI_CHAR_MAP.get(r["char"])
+        if k and k not in UI_E:
+            UI_E[k] = {"id": r["doc_id"], "char": r["char"]}
+    log.info("UI emojis loaded: %d", len(UI_E))
+
+
+# ==================== UTILS ====================
 TOKEN_RE = re.compile(r"\{(\d+)\}|\[\[([^\]|]+)\|([^\]]+)\]\]")
 DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 
@@ -232,7 +260,9 @@ def render(body, lookup):
             num = nd(m.group(1))
             item = lookup(num)
             if item:
-                parts.append(f'<emoji id="{item["doc_id"]}">{esc(item["char"])}</emoji>')
+                parts.append(
+                    f'<tg-emoji emoji-id="{item["doc_id"]}">{esc(item["char"])}</tg-emoji>'
+                )
                 used.append(num)
             else:
                 missing.append(num)
@@ -276,14 +306,14 @@ def clean_pack_name(s):
     return s.split("/")[-1] if "/" in s else s
 
 
-# ---------------- keyboards ----------------
+# ==================== KEYBOARDS ====================
 def kb_main():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧩 تصفّح", callback_data="m:browse"),
          InlineKeyboardButton("✍️ مسودتي", callback_data="m:draft")],
         [InlineKeyboardButton("➕ ضيف حزمة", callback_data="m:addpack"),
          InlineKeyboardButton("📦 حزمي", callback_data="m:packs")],
-        [InlineKeyboardButton("📄 قوالبي", callback_data="m:tpls"),
+        [InlineKeyboardButton("📄 قوالي", callback_data="m:tpls"),
          InlineKeyboardButton("⭐ المفضلة", callback_data="m:favs")],
         [InlineKeyboardButton("📢 قنواتي", callback_data="m:channels"),
          InlineKeyboardButton("⏰ المجدولة", callback_data="m:sched")],
@@ -292,7 +322,8 @@ def kb_main():
     ])
 
 def kb_home():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 القائمة", callback_data="m:home")]])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🏠 القائمة", callback_data="m:home")]])
 
 def kb_grid(items, pid, page, pages, search=None):
     rows, row = [], []
@@ -344,7 +375,7 @@ def kb_channels(rows, prefix="send"):
     return InlineKeyboardMarkup(kb)
 
 
-# ---------------- guard ----------------
+# ==================== GUARD ====================
 def owner_only(fn):
     async def w(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = update.effective_user
@@ -353,18 +384,11 @@ def owner_only(fn):
     return w
 
 
-# ---------------- pack loading ----------------
-async def load_pack(ctx, raw, msg=None):
-    name = clean_pack_name(raw)
-    try:
-        st = await ctx.bot.get_sticker_set(name)
-    except TelegramError as e:
-        if msg: await msg.reply_text(f"❌ مش لاقي الحزمة:\n{e}", parse_mode=HTML)
-        return 0
+# ==================== PACK LOADING ====================
+async def load_pack_from_bot(bot, name):
+    st = await bot.get_sticker_set(clean_pack_name(name))
     kind = getattr(st.sticker_type, "value", st.sticker_type)
-    if kind != "custom_emoji":
-        if msg: await msg.reply_text("❌ دي مش حزمة إيموجي بريميوم.", parse_mode=HTML)
-        return 0
+    if kind != "custom_emoji": return 0
     pid = db.add_pack(st.name, st.title)
     added = 0
     for s in st.stickers:
@@ -374,48 +398,66 @@ async def load_pack(ctx, raw, msg=None):
     return added
 
 
-# ---------------- commands ----------------
+# ==================== COMMANDS ====================
 @owner_only
 async def c_start(update, ctx):
-    await update.message.reply_text(
-        "🦇 <b>بوت الإيموجي البريميوم</b>\n\n"
-        "اختار من الأزرار تحت 👇",
-        parse_mode=HTML, reply_markup=kb_main())
+    b = ui("bat", "🦇")
+    spark = ui("star2", "✨")
+    txt = (
+        f"{b} <b>بوت الإيموجي البريميوم</b> {spark}\n\n"
+        f"{ui('browse', '🧩')} <b>تصفّح</b> — دوّر على إيموجي واعرف رقمه\n"
+        f"{ui('draft', '✍️')} <b>مسودتي</b> — اكتب منشورك\n"
+        f"{ui('addpack', '➕')} <b>ضيف حزمة</b> — اكتب رابط أو اسم حزمة\n"
+        f"{ui('send', '📤')} <b>إرسال</b> — انشر لقناتك\n\n"
+        f"<i>اختار من الأزرار تحت</i> 👇"
+    )
+    await update.message.reply_text(txt, parse_mode=HTML, reply_markup=kb_main())
+
 
 @owner_only
 async def c_help(update, ctx):
     await update.message.reply_text(
-        "<b>📖 المساعدة</b>\n\n"
+        f"{ui('help', '❓')} <b>المساعدة</b>\n\n"
         "<b>الكتابة:</b>\n"
         "• <code>{62}</code> = إيموجي رقم 62\n"
-        "• <code>*bold*</code> <code>_italic_</code> <code>~strike~</code>\n"
+        "• <code>*bold*</code> • <code>_italic_</code> • <code>~strike~</code>\n"
         "• <code>||spoiler||</code>\n"
-        "• <code>[نص](url)</code>\n"
-        "• <code>[[زر|url]]</code>\n\n"
+        "• <code>[نص](url)</code> — لينك\n"
+        "• <code>[[زر|url]]</code> — زر شفاف\n\n"
         "<b>الأوامر:</b>\n"
         "/addpack — ضيف حزمة\n"
         "/browse — تصفّح\n"
         "/draft — مسودتي\n"
         "/send — إرسال\n"
-        "/schedule <دقائق>\n"
-        "/save <اسم>\n"
+        "/schedule &lt;دقائق&gt;\n"
+        "/save &lt;اسم&gt;\n"
         "/channels /addchannel\n"
         "/stats",
         parse_mode=HTML, reply_markup=kb_main())
+
 
 @owner_only
 async def c_addpack(update, ctx):
     if not ctx.args:
         ctx.user_data["s"] = "pack"
-        return await update.message.reply_text("ابعتلي اسم الحزمة أو رابط addemoji.")
-    added = await load_pack(ctx, " ".join(ctx.args), update.message)
+        return await update.message.reply_text(
+            f"{ui('addpack', '➕')} ابعتلي اسم الحزمة أو رابط addemoji.")
+    try:
+        added = await load_pack_from_bot(ctx.bot, " ".join(ctx.args))
+    except TelegramError as e:
+        return await update.message.reply_text(f"❌ {e}")
     if added:
-        await update.message.reply_text(f"✅ انضاف {added} إيموجي.", parse_mode=HTML)
+        await build_ui_emojis()
+        await update.message.reply_text(
+            f"{ui('check', '✅')} انضاف <b>{added}</b> إيموجي.",
+            parse_mode=HTML)
+
 
 @owner_only
 async def c_browse(update, ctx):
     pid = int(ctx.args[0]) if ctx.args and ctx.args[0].isdigit() else None
     await show_browse(update.message, ctx, pid, 0, "")
+
 
 async def show_browse(target, ctx, pid, page, search):
     total = db.count_emojis(pid, search or None)
@@ -428,20 +470,24 @@ async def show_browse(target, ctx, pid, page, search):
     if pid:
         p = db.get_pack(pid); title = esc(p["title"]) if p else "?"
     extra = f" — بحث: {esc(search)}" if search else ""
+    b = ui("browse", "🧩")
     await target.reply_text(
-        f"🧩 <b>{title}</b>{extra}\n{total} إيموجي — صفحة {page+1}/{pages}\n"
-        "دوس على إيموجي يطلعلك رقمه.",
+        f"{b} <b>{title}</b>{extra}\n"
+        f"{ui('list', '📋')} {total} إيموجي — صفحة {page+1}/{pages}\n"
+        f"<i>دوس على إيموجي يطلعلك رقمه.</i>",
         parse_mode=HTML,
         reply_markup=kb_grid(items, pid or 0, page, pages, search or None))
+
 
 @owner_only
 async def c_packs(update, ctx):
     rows = db.list_packs()
     if not rows: return await update.message.reply_text("مفيش حزم.")
-    lines = ["📦 <b>الحزم:</b>\n"]
+    lines = [f"{ui('packs', '📦')} <b>الحزم:</b>\n"]
     for p in rows:
         lines.append(f"• <code>{p['id']}</code> — {esc(p['title'])} ({db.count_pack(p['id'])})")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
 
 @owner_only
 async def c_draft(update, ctx):
@@ -449,13 +495,17 @@ async def c_draft(update, ctx):
     body = d["body"] or ""
     shown = (body[:3000] + "…") if len(body) > 3000 else body
     await update.message.reply_text(
-        f"<b>مسودتك:</b>\n\n<code>{esc(shown) or '(فاضية)'}</code>",
+        f"{ui('draft', '✍️')} <b>مسودتك:</b>\n\n<code>{esc(shown) or '(فاضية)'}</code>",
         parse_mode=HTML, reply_markup=kb_draft())
+
 
 @owner_only
 async def c_new(update, ctx):
     db.clear_draft(update.effective_user.id)
-    await update.message.reply_text("مسودة جديدة. ابعتلي النص.", reply_markup=kb_draft())
+    await update.message.reply_text(
+        f"{ui('draft', '✍️')} مسودة جديدة. ابعتلي النص.",
+        parse_mode=HTML, reply_markup=kb_draft())
+
 
 @owner_only
 async def c_send(update, ctx):
@@ -465,6 +515,7 @@ async def c_send(update, ctx):
         return await update.message.reply_text("مفيش قنوات. /addchannel")
     if len(chs) == 1: return await do_send(update.message, ctx, chs[0]["chat_id"])
     await update.message.reply_text("اختار قناة:", reply_markup=kb_channels(chs))
+
 
 async def do_send(msg, ctx, chat_id):
     uid = msg.from_user.id
@@ -483,9 +534,10 @@ async def do_send(msg, ctx, chat_id):
             await ctx.bot.send_video(chat_id, d["media_file_id"], caption=html_out, **kw)
         else:
             await ctx.bot.send_message(chat_id, html_out, **kw)
-        await msg.reply_text("✅ اتبعت.")
+        await msg.reply_text(f"{ui('check', '✅')} اتبعت.", parse_mode=HTML)
     except TelegramError as e:
         await msg.reply_text(f"❌ فشل: {e}")
+
 
 async def show_preview(target, ctx):
     uid = target.from_user.id
@@ -506,10 +558,13 @@ async def show_preview(target, ctx):
             await target.reply_text(html_out, **kw)
     except TelegramError as e:
         return await target.reply_text(f"❌ {e}")
-    note = "\n⚠️ أرقام مش موجودة: " + ", ".join(f"{{{m}}}" for m in missing) if missing else ""
+    note = ""
+    if missing:
+        note = "\n⚠️ أرقام مش موجودة: " + ", ".join(f"{{{m}}}" for m in missing)
     await target.reply_text(
-        "<b>الكود الخام:</b>\n<code>" + esc(html_out) + "</code>" + note,
+        f"{ui('list', '📋')} <b>الكود الخام:</b>\n<code>" + esc(html_out) + "</code>" + note,
         parse_mode=HTML, reply_markup=kb_preview())
+
 
 @owner_only
 async def c_schedule(update, ctx):
@@ -517,6 +572,7 @@ async def c_schedule(update, ctx):
         ctx.user_data["s"] = "sched"
         return await update.message.reply_text("بعد كام دقيقة؟")
     await do_schedule(update.message, ctx, ctx.args[0])
+
 
 async def do_schedule(msg, ctx, raw):
     try: minutes = int(nd(raw.strip()))
@@ -545,18 +601,21 @@ async def do_schedule(msg, ctx, raw):
 
     j = ctx.job_queue.run_once(job, when=minutes*60, name=f"sch{sid}")
     db.set_job(sid, str(j.id) if j and j.id else "")
-    await msg.reply_text(f"⏰ هينشر بعد {minutes} دقيقة.")
+    await msg.reply_text(
+        f"{ui('clock', '⏰')} هينشر بعد {minutes} دقيقة.", parse_mode=HTML)
+
 
 @owner_only
 async def c_sched_list(update, ctx):
     rows = db.list_sched()
     if not rows: return await update.message.reply_text("مفيش مجدولة.")
-    lines = ["⏰ <b>المجدولة:</b>\n"]
+    lines = [f"{ui('sched', '⏰')} <b>المجدولة:</b>\n"]
     for r in rows:
         m = max(0, (r["run_at"] - int(time.time())) // 60)
         lines.append(f"• <code>{r['id']}</code> بعد ~{m} دقيقة")
-    lines.append("\nمسح: /delsched <id>")
+    lines.append("\nمسح: /delsched &lt;id&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
 
 @owner_only
 async def c_delsched(update, ctx):
@@ -567,6 +626,7 @@ async def c_delsched(update, ctx):
     db.del_sched(sid)
     await update.message.reply_text("اتمسحت.")
 
+
 @owner_only
 async def c_save(update, ctx):
     if not ctx.args:
@@ -574,23 +634,29 @@ async def c_save(update, ctx):
         return await update.message.reply_text("اسم القالب؟")
     await do_save_tpl(update.message, ctx, " ".join(ctx.args))
 
+
 async def do_save_tpl(msg, ctx, name):
     name = name.strip()[:60]
     if not name: return await msg.reply_text("اسم فاضي.")
     d = db.get_draft(msg.from_user.id)
     body = d["body"] or ""
     if not body.strip(): return await msg.reply_text("مسودتك فاضية.")
-    if db.save_tpl(name, body): await msg.reply_text(f"✅ اتحفظ «{esc(name)}»", parse_mode=HTML)
-    else: await msg.reply_text("الاسم موجود.")
+    if db.save_tpl(name, body):
+        await msg.reply_text(
+            f"{ui('save', '💾')} اتحفظ «{esc(name)}»", parse_mode=HTML)
+    else:
+        await msg.reply_text("الاسم موجود.")
+
 
 @owner_only
 async def c_tpls(update, ctx):
     rows = db.list_tpls()
     if not rows: return await update.message.reply_text("مفيش قوالب.")
-    lines = ["📄 <b>القوالب:</b>\n"]
+    lines = [f"{ui('tpls', '📄')} <b>القوالب:</b>\n"]
     for r in rows: lines.append(f"• <code>{r['id']}</code> — {esc(r['name'])}")
-    lines.append("\nتحميل: /tpl <id>")
+    lines.append("\nتحميل: /tpl &lt;id&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
 
 @owner_only
 async def c_tpl(update, ctx):
@@ -600,25 +666,31 @@ async def c_tpl(update, ctx):
     r = db.get_tpl(tid)
     if not r: return await update.message.reply_text("مش موجود.")
     db.set_draft(update.effective_user.id, r["body"])
-    await update.message.reply_text(f"✅ اتحمّل في المسودة.")
+    await update.message.reply_text(
+        f"{ui('check', '✅')} اتحمّل في المسودة.", parse_mode=HTML)
+
 
 @owner_only
 async def c_favs(update, ctx):
     rows = db.list_favs()
     if not rows: return await update.message.reply_text("مفيش مفضلة.")
-    lines = ["⭐ <b>المفضلة:</b>\n"]
+    lines = [f"{ui('favs', '⭐')} <b>المفضلة:</b>\n"]
     for r in rows[:60]:
-        lines.append(f'<emoji id="{r["doc_id"]}">{esc(r["char"])}</emoji> <code>{{{r["num"]}}}</code>')
+        lines.append(
+            f'<tg-emoji emoji-id="{r["doc_id"]}">{esc(r["char"])}</tg-emoji> '
+            f'<code>{{{r["num"]}}}</code>')
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
 
 @owner_only
 async def c_channels(update, ctx):
     rows = db.list_channels()
     if not rows: return await update.message.reply_text("مفيش قنوات. /addchannel")
-    lines = ["📢 <b>القنوات:</b>\n"]
+    lines = [f"{ui('channels', '📢')} <b>القنوات:</b>\n"]
     for r in rows: lines.append(f"• <code>{r['id']}</code> — {esc(r['title'] or r['chat_id'])}")
-    lines.append("\nمسح: /delchannel <id>")
+    lines.append("\nمسح: /delchannel &lt;id&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
 
 @owner_only
 async def c_addchannel(update, ctx):
@@ -627,13 +699,18 @@ async def c_addchannel(update, ctx):
         return await update.message.reply_text("ابعت @username أو -100...")
     await do_addch(update.message, ctx, ctx.args[0])
 
+
 async def do_addch(msg, ctx, raw):
     cid = raw.strip()
     try: chat = await ctx.bot.get_chat(cid)
     except TelegramError as e: return await msg.reply_text(f"❌ {e}")
     title = chat.title or chat.username or str(chat.id)
-    if db.add_channel(str(chat.id), title): await msg.reply_text(f"✅ انضافت «{esc(title)}»", parse_mode=HTML)
-    else: await msg.reply_text("موجودة.")
+    if db.add_channel(str(chat.id), title):
+        await msg.reply_text(
+            f"{ui('check', '✅')} انضافت «{esc(title)}»", parse_mode=HTML)
+    else:
+        await msg.reply_text("موجودة.")
+
 
 @owner_only
 async def c_delchannel(update, ctx):
@@ -643,20 +720,30 @@ async def c_delchannel(update, ctx):
     db.del_channel(rid)
     await update.message.reply_text("اتمسحت.")
 
+
 @owner_only
 async def c_stats(update, ctx):
     packs = db.list_packs(); total = db.count_emojis()
     favs = len(db.list_favs()); tpls = len(db.list_tpls())
     chs = len(db.list_channels()); sch = len(db.list_sched())
     top = db.top_used(10)
-    lines = ["📊 <b>إحصائيات</b>\n", f"📦 حزم: {len(packs)}",
-             f"😀 إيموجي: {total}", f"⭐ مفضلة: {favs}",
-             f"📄 قوالب: {tpls}", f"📢 قنوات: {chs}", f"⏰ مجدولة: {sch}\n"]
+    lines = [
+        f"{ui('stats', '📊')} <b>إحصائيات</b>\n",
+        f"{ui('packs', '📦')} حزم: <b>{len(packs)}</b>",
+        f"{ui('browse', '🧩')} إيموجي: <b>{total}</b>",
+        f"{ui('favs', '⭐')} مفضلة: <b>{favs}</b>",
+        f"{ui('tpls', '📄')} قوالب: <b>{len(tpls)}</b>",
+        f"{ui('channels', '📢')} قنوات: <b>{chs}</b>",
+        f"{ui('sched', '⏰')} مجدولة: <b>{sch}</b>\n",
+    ]
     if top:
-        lines.append("<b>الأكثر استخداماً:</b>")
+        lines.append(f"{ui('fire', '🔥')} <b>الأكثر استخداماً:</b>")
         for r in top:
-            lines.append(f'<emoji id="{r["doc_id"]}">{esc(r["char"])}</emoji> <code>{{{r["num"]}}}</code> × {r["uses"]}')
+            lines.append(
+                f'<tg-emoji emoji-id="{r["doc_id"]}">{esc(r["char"])}</tg-emoji> '
+                f'<code>{{{r["num"]}}}</code> × {r["uses"]}')
     await update.message.reply_text("\n".join(lines), parse_mode=HTML)
+
 
 @owner_only
 async def c_export(update, ctx):
@@ -672,7 +759,7 @@ async def c_export(update, ctx):
                                 caption=f"{len(data['emojis'])} إيموجي")
 
 
-# ---------------- text/media ----------------
+# ==================== TEXT / MEDIA ====================
 @owner_only
 async def on_text(update, ctx):
     msg = update.message
@@ -681,8 +768,14 @@ async def on_text(update, ctx):
     state = ctx.user_data.pop("s", None)
 
     if state == "pack":
-        added = await load_pack(ctx, text, msg)
-        if added: await msg.reply_text(f"✅ انضاف {added} إيموجي.")
+        try: added = await load_pack_from_bot(ctx.bot, text)
+        except TelegramError as e:
+            return await msg.reply_text(f"❌ {e}")
+        if added:
+            await build_ui_emojis()
+            await msg.reply_text(
+                f"{ui('check', '✅')} انضاف <b>{added}</b> إيموجي.",
+                parse_mode=HTML)
         return
     if state == "ch": return await do_addch(msg, ctx, text)
     if state == "tplname": return await do_save_tpl(msg, ctx, text)
@@ -692,10 +785,13 @@ async def on_text(update, ctx):
     found = extract_emoji(msg)
     if found:
         pid = db.add_pack("inbox", "📥 الوارد")
-        lines = ["✅ ضفتها للوارد:\n"]
+        lines = [f"{ui('check', '✅')} ضفتها للوارد:\n"]
         for char, doc_id in found:
             num, _ = db.add_emoji(char, doc_id, pid)
-            lines.append(f'<emoji id="{doc_id}">{esc(char)}</emoji> → <code>{{{num}}}</code>')
+            lines.append(
+                f'<tg-emoji emoji-id="{doc_id}">{esc(char)}</tg-emoji> → '
+                f'<code>{{{num}}}</code>')
+        await build_ui_emojis()
         await msg.reply_text("\n".join(lines), parse_mode=HTML)
         return
 
@@ -703,7 +799,10 @@ async def on_text(update, ctx):
         db.set_draft(msg.from_user.id, text)
         return await show_preview(msg, ctx)
 
-    await msg.reply_text("ابعتلي منشور فيه <code>{رقم}</code>، أو /start للقائمة.", parse_mode=HTML)
+    await msg.reply_text(
+        f"{ui('help', '❓')} ابعتلي منشور فيه <code>{{رقم}}</code>، "
+        f"أو /start للقائمة.", parse_mode=HTML)
+
 
 @owner_only
 async def on_media(update, ctx):
@@ -713,14 +812,14 @@ async def on_media(update, ctx):
     if msg.photo:
         db.set_media(uid, "photo", msg.photo[-1].file_id)
         if msg.caption: db.set_draft(uid, msg.caption)
-        await msg.reply_text("🖼 اتحفظت.")
+        await msg.reply_text(f"{ui('media', '🖼')} اتحفظت.", parse_mode=HTML)
     elif msg.video:
         db.set_media(uid, "video", msg.video.file_id)
         if msg.caption: db.set_draft(uid, msg.caption)
-        await msg.reply_text("🎬 اتحفظ.")
+        await msg.reply_text(f"{ui('media', '🎬')} اتحفظ.", parse_mode=HTML)
 
 
-# ---------------- callbacks ----------------
+# ==================== CALLBACKS ====================
 @owner_only
 async def on_cb(update, ctx):
     q = update.callback_query
@@ -729,15 +828,17 @@ async def on_cb(update, ctx):
         if d == "noop": return await q.answer()
 
         if d == "m:home":
-            await q.edit_message_text("🦇 <b>القائمة</b>", parse_mode=HTML,
-                                      reply_markup=kb_main())
+            await q.edit_message_text(
+                f"{ui('bat', '🦇')} <b>القائمة</b>", parse_mode=HTML,
+                reply_markup=kb_main())
             return await q.answer()
         if d == "m:browse":
             await q.answer()
             return await show_browse(q.message, ctx, None, 0, "")
         if d == "m:addpack":
             ctx.user_data["s"] = "pack"
-            await q.edit_message_text("ابعتلي اسم الحزمة أو الرابط.", reply_markup=kb_home())
+            await q.edit_message_text("ابعتلي اسم الحزمة أو الرابط.",
+                                      reply_markup=kb_home())
             return await q.answer()
         if d == "m:packs":
             rows = db.list_packs()
@@ -754,8 +855,9 @@ async def on_cb(update, ctx):
             row = db.get_draft(q.from_user.id)
             body = row["body"] or ""
             shown = (body[:3000] + "…") if len(body) > 3000 else body
-            await q.edit_message_text(f"<b>مسودتك:</b>\n\n<code>{esc(shown) or '(فاضية)'}</code>",
-                                      parse_mode=HTML, reply_markup=kb_draft())
+            await q.edit_message_text(
+                f"<b>مسودتك:</b>\n\n<code>{esc(shown) or '(فاضية)'}</code>",
+                parse_mode=HTML, reply_markup=kb_draft())
             return await q.answer()
         if d == "m:tpls":
             rows = db.list_tpls()
@@ -765,22 +867,27 @@ async def on_cb(update, ctx):
                 kb = [[InlineKeyboardButton(f"📄 {r['name'][:30]}", callback_data=f"tu:{r['id']}"),
                        InlineKeyboardButton("🗑", callback_data=f"td:{r['id']}")] for r in rows]
                 kb.append([InlineKeyboardButton("🏠 القائمة", callback_data="m:home")])
-                await q.edit_message_text("📄 القوالب", reply_markup=InlineKeyboardMarkup(kb))
+                await q.edit_message_text("📄 القوالب",
+                                          reply_markup=InlineKeyboardMarkup(kb))
             return await q.answer()
         if d == "m:favs":
             rows = db.list_favs()
             if not rows:
                 await q.edit_message_text("مفيش مفضلة.", reply_markup=kb_home())
             else:
-                lines = ["⭐ <b>المفضلة</b>\n"]
+                lines = [f"{ui('favs', '⭐')} <b>المفضلة</b>\n"]
                 for r in rows[:40]:
-                    lines.append(f'<emoji id="{r["doc_id"]}">{esc(r["char"])}</emoji> <code>{{{r["num"]}}}</code>')
-                await q.edit_message_text("\n".join(lines), parse_mode=HTML, reply_markup=kb_home())
+                    lines.append(
+                        f'<tg-emoji emoji-id="{r["doc_id"]}">{esc(r["char"])}</tg-emoji> '
+                        f'<code>{{{r["num"]}}}</code>')
+                await q.edit_message_text("\n".join(lines), parse_mode=HTML,
+                                          reply_markup=kb_home())
             return await q.answer()
         if d == "m:channels":
             rows = db.list_channels()
-            await q.edit_message_text("📢 <b>القنوات</b>",
-                parse_mode=HTML, reply_markup=kb_channels(rows, "chd") if rows
+            await q.edit_message_text(
+                "📢 <b>القنوات</b>", parse_mode=HTML,
+                reply_markup=kb_channels(rows, "chd") if rows
                 else InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة", callback_data="m:addch"),
                                             InlineKeyboardButton("🏠", callback_data="m:home")]]))
             return await q.answer()
@@ -793,20 +900,23 @@ async def on_cb(update, ctx):
             if not rows:
                 await q.edit_message_text("مفيش قنوات.", reply_markup=kb_home())
             else:
-                kb = [[InlineKeyboardButton(f"🗑 {r['title'][:30]}", callback_data=f"chx:{r['id']}")] for r in rows]
+                kb = [[InlineKeyboardButton(f"🗑 {r['title'][:30]}", callback_data=f"chx:{r['id']}")]
+                      for r in rows]
                 kb.append([InlineKeyboardButton("🏠", callback_data="m:home")])
-                await q.edit_message_text("اختار للمسح:", reply_markup=InlineKeyboardMarkup(kb))
+                await q.edit_message_text("اختار للمسح:",
+                                          reply_markup=InlineKeyboardMarkup(kb))
             return await q.answer()
         if d == "m:sched":
             rows = db.list_sched()
             if not rows:
                 await q.edit_message_text("مفيش مجدولة.", reply_markup=kb_home())
             else:
-                lines = ["⏰ <b>المجدولة</b>\n"]
+                lines = [f"{ui('sched', '⏰')} <b>المجدولة</b>\n"]
                 for r in rows:
                     m = max(0, (r["run_at"] - int(time.time())) // 60)
                     lines.append(f"• <code>{r['id']}</code> بعد ~{m} دقيقة")
-                await q.edit_message_text("\n".join(lines), parse_mode=HTML, reply_markup=kb_home())
+                await q.edit_message_text("\n".join(lines), parse_mode=HTML,
+                                          reply_markup=kb_home())
             return await q.answer()
         if d == "m:stats":
             await q.answer()
@@ -832,7 +942,8 @@ async def on_cb(update, ctx):
             await q.answer(f"{{{num}}} = {it['char']}", show_alert=True)
             try:
                 await q.message.reply_text(
-                    f'<emoji id="{it["doc_id"]}">{esc(it["char"])}</emoji> → <code>{{{num}}}</code>',
+                    f'<tg-emoji emoji-id="{it["doc_id"]}">{esc(it["char"])}</tg-emoji> → '
+                    f'<code>{{{num}}}</code>',
                     parse_mode=HTML, reply_markup=kb)
             except TelegramError: pass
             return
@@ -855,8 +966,8 @@ async def on_cb(update, ctx):
             lines = [f'{it["num"]}={it["char"]}' for it in items]
             chunk = "\n".join(lines)
             for i in range(0, len(chunk), 3500):
-                await q.message.reply_text("<code>" + esc(chunk[i:i+3500]) + "</code>",
-                                           parse_mode=HTML)
+                await q.message.reply_text(
+                    "<code>" + esc(chunk[i:i+3500]) + "</code>", parse_mode=HTML)
             return await q.answer()
 
         if d == "d:prev":
@@ -906,7 +1017,7 @@ async def on_cb(update, ctx):
             if not t: return await q.answer("مش موجود.", show_alert=True)
             db.set_draft(q.from_user.id, t["body"])
             await q.answer("اتحمّل")
-            return await q.message.reply_text(f"✅ اتحمّل في المسودة.")
+            return await q.message.reply_text("✅ اتحمّل في المسودة.")
         if d.startswith("td:"):
             tid = int(d.split(":", 1)[1])
             db.del_tpl(tid)
@@ -918,7 +1029,7 @@ async def on_cb(update, ctx):
         except Exception: pass
 
 
-# ---------------- startup ----------------
+# ==================== STARTUP ====================
 async def post_init(app):
     if AUTO_PACKS:
         log.info("loading %d auto packs", len(AUTO_PACKS))
@@ -928,18 +1039,8 @@ async def post_init(app):
                 log.info("loaded %s: %d emojis", name, n)
             except Exception as e:
                 log.warning("auto pack %s failed: %s", name, e)
-
-async def load_pack_from_bot(bot, name):
-    st = await bot.get_sticker_set(clean_pack_name(name))
-    kind = getattr(st.sticker_type, "value", st.sticker_type)
-    if kind != "custom_emoji": return 0
-    pid = db.add_pack(st.name, st.title)
-    added = 0
-    for s in st.stickers:
-        if s.custom_emoji_id:
-            _, new = db.add_emoji(s.emoji, s.custom_emoji_id, pid)
-            if new: added += 1
-    return added
+    await build_ui_emojis()
+    log.info("UI ready with %d premium emojis", len(UI_E))
 
 
 def main():
@@ -968,8 +1069,11 @@ def main():
     app.add_handler(CommandHandler("stats", c_stats))
     app.add_handler(CommandHandler("export", c_export))
     app.add_handler(CallbackQueryHandler(on_cb))
-    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE, on_media))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND & filters.ChatType.PRIVATE, on_text))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE, on_media))
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        on_text))
     log.info("bot running")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
