@@ -33,6 +33,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
+          AUTO_PACKS: ${{ vars.AUTO_PACKS }}
           DB_PATH: ./bot_data.db
         run: timeout 20100 python bot.py || true
 
