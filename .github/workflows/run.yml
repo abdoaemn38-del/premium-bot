@@ -1,0 +1,45 @@
+name: Run Premium Bot
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bot-runner
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          DB_PATH: ./bot_data.db
+        run: timeout 20100 python bot.py || true
+
+      - name: Save DB
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add bot_data.db 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "auto save db"
+          git push || true
